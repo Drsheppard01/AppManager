@@ -40,6 +40,9 @@ namespace AppManager.Core {
         public string? original_startup_wm_class { get; set; }
         public string? original_update_link { get; set; }
         public string? original_web_page { get; set; }
+        // Per-action original Exec args from the bundled .desktop, captured at install/update.
+        // Each entry is "action_name=args" (mirroring custom_env_vars storage shape).
+        public string[]? original_action_args { get; set; }
         public string? entry_exec { get; set; }
         public bool is_terminal { get; set; default = false; }
 
@@ -182,7 +185,16 @@ namespace AppManager.Core {
             builder.add_string_value(original_update_link ?? "");
             builder.set_member_name("original_web_page");
             builder.add_string_value(original_web_page ?? "");
-            
+
+            if (original_action_args != null && original_action_args.length > 0) {
+                builder.set_member_name("original_action_args");
+                builder.begin_array();
+                foreach (var pair in original_action_args) {
+                    builder.add_string_value(pair);
+                }
+                builder.end_array();
+            }
+
             // Pre-release channel preference
             builder.set_member_name("prerelease_enabled");
             builder.add_boolean_value(prerelease_enabled);
@@ -320,7 +332,16 @@ namespace AppManager.Core {
             record.original_update_link = original_update_link == "" ? null : original_update_link;
             var original_web_page = obj.get_string_member_with_default("original_web_page", "");
             record.original_web_page = original_web_page == "" ? null : original_web_page;
-            
+
+            if (obj.has_member("original_action_args")) {
+                var arr = obj.get_array_member("original_action_args");
+                var list = new string[arr.get_length()];
+                for (uint i = 0; i < arr.get_length(); i++) {
+                    list[i] = arr.get_string_element(i);
+                }
+                record.original_action_args = list;
+            }
+
             // Legacy support: migrate old update_link/web_page to original_* fields
             if (record.original_update_link == null) {
                 var legacy_update_link = obj.get_string_member_with_default("update_link", "");

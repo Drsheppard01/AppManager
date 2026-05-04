@@ -638,6 +638,11 @@ namespace AppManager.Core {
                 record.original_update_link = original_update_url;
                 record.original_web_page = original_homepage;
                 record.zsync_update_info = zsync_info;  // Store zsync info if present
+
+                // Capture per-action original args from the pristine bundled .desktop so that
+                // subsequent rewrites (e.g. from the GUI) have a stable source instead of
+                // re-parsing already-modified Exec lines.
+                record.original_action_args = capture_action_args(desktop_entry);
                 
                 // For fresh install with history (reinstall), use effective values (considers CLEARED_VALUE)
                 var effective_icon = record.get_effective_icon_name() ?? icon_name_for_desktop;
@@ -782,45 +787,84 @@ namespace AppManager.Core {
             }
         }
 
-        private string rewrite_desktop(string desktop_path, string exec_target, InstallationRecord record, bool is_terminal, string slug, bool is_upgrade, string? effective_icon_name, string? effective_keywords, string? effective_startup_wm_class, string? effective_commandline_args, string? effective_update_link, string? effective_web_page) throws Error {
-            var entry = new DesktopEntry(desktop_path);
-            
-            // Update Exec with optional environment variables
-            var args = effective_commandline_args ?? "";
-            var env_vars = record.custom_env_vars;
-            
-            string exec_line;
-            if (env_vars != null && env_vars.length > 0) {
-                // Use 'env' command to set environment variables
-                var env_builder = new StringBuilder("env ");
-                foreach (var env_var in env_vars) {
-                    if (env_var != null && env_var.strip() != "") {
-                        // Parse NAME=value and quote the value
-                        var eq_pos = env_var.index_of_char('=');
-                        if (eq_pos >= 0) {
-                            var name_part = env_var.substring(0, eq_pos);
-                            var value_part = env_var.substring(eq_pos + 1);
-                            env_builder.append("%s=\"%s\" ".printf(name_part, value_part));
-                        } else {
-                            // No value, just the name
-                            env_builder.append(env_var);
-                            env_builder.append(" ");
-                        }
-                    }
-                }
-                if (args.strip() != "") {
-                    exec_line = "%s\"%s\" %s".printf(env_builder.str, exec_target, args);
-                } else {
-                    exec_line = "%s\"%s\"".printf(env_builder.str, exec_target);
-                }
-            } else {
-                if (args.strip() != "") {
-                    exec_line = "\"%s\" %s".printf(exec_target, args);
-                } else {
-                    exec_line = "\"%s\"".printf(exec_target);
+        private string[]? capture_action_args(DesktopEntry entry) {
+            var keyfile = entry.get_key_file();
+            var actions_str = entry.actions ?? "";
+            var captured = new Gee.ArrayList<string>();
+            foreach (var part in actions_str.split(";")) {
+                var name = part.strip();
+                if (name == "" || name == "Uninstall") continue;
+                var group = "Desktop Action %s".printf(name);
+                try {
+                    if (!keyfile.has_group(group) || !keyfile.has_key(group, "Exec")) continue;
+                    var args = DesktopEntry.extract_exec_arguments(keyfile.get_string(group, "Exec")) ?? "";
+                    captured.add("%s=%s".printf(name, args));
+                } catch (Error e) {
+                    debug("capture_action_args %s: %s", group, e.message);
                 }
             }
+            return captured.size > 0 ? captured.to_array() : null;
+        }
+
+        private string build_env_prefix(string[]? env_vars) {
+            if (env_vars == null || env_vars.length == 0) {
+                return "";
+            }
+            var env_builder = new StringBuilder("env ");
+            foreach (var env_var in env_vars) {
+                if (env_var != null && env_var.strip() != "") {
+                    var eq_pos = env_var.index_of_char('=');
+                    if (eq_pos >= 0) {
+                        var name_part = env_var.substring(0, eq_pos);
+                        var value_part = env_var.substring(eq_pos + 1);
+                        env_builder.append("%s=\"%s\" ".printf(name_part, value_part));
+                    } else {
+                        env_builder.append(env_var);
+                        env_builder.append(" ");
+                    }
+                }
+            }
+            return env_builder.str;
+        }
+
+        private string rewrite_desktop(string desktop_path, string exec_target, InstallationRecord record, bool is_terminal, string slug, bool is_upgrade, string? effective_icon_name, string? effective_keywords, string? effective_startup_wm_class, string? effective_commandline_args, string? effective_update_link, string? effective_web_page) throws Error {
+            var entry = new DesktopEntry(desktop_path);
+
+            // Update Exec with optional environment variables
+            var args = effective_commandline_args ?? "";
+            var env_prefix = build_env_prefix(record.custom_env_vars);
+
+            string exec_line;
+            if (args.strip() != "") {
+                exec_line = "%s\"%s\" %s".printf(env_prefix, exec_target, args);
+            } else {
+                exec_line = "%s\"%s\"".printf(env_prefix, exec_target);
+            }
             entry.exec = exec_line;
+
+            // Action Exec lines: same shape as main Exec, but each action keeps its own
+            // intrinsic args (--new-window, --screenshot, ...) instead of effective_commandline_args.
+            // Pristine action args come from record.original_action_args (captured at install time);
+            // re-parsing the current Exec would compound corruption across repeated rewrites.
+            var extra_user_args = (record.custom_commandline_args != null
+                && record.custom_commandline_args != CLEARED_VALUE
+                && record.custom_commandline_args.strip() != "") ? record.custom_commandline_args.strip() : "";
+            var keyfile = entry.get_key_file();
+            if (record.original_action_args != null) {
+                foreach (var pair in record.original_action_args) {
+                    var eq = pair.index_of_char('=');
+                    if (eq < 0) continue;
+                    var action_name = pair.substring(0, eq);
+                    var preserved = pair.substring(eq + 1);
+                    var group = "Desktop Action %s".printf(action_name);
+                    if (!keyfile.has_group(group)) continue;
+                    var trail = (preserved + " " + extra_user_args).strip();
+                    var line = trail == ""
+                        ? "%s\"%s\"".printf(env_prefix, exec_target)
+                        : "%s\"%s\" %s".printf(env_prefix, exec_target, trail);
+                    keyfile.set_string(group, "Exec", line);
+                }
+            }
             
             // Update Icon
             entry.icon = (effective_icon_name != null && effective_icon_name.strip() != "") ? effective_icon_name : null;
