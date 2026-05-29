@@ -26,7 +26,7 @@ namespace AppManager {
         private UpdateWorkflowState update_state = UpdateWorkflowState.READY_TO_CHECK;
         private GLib.Cancellable? update_cancellable;
         private Gee.HashSet<string> pending_update_keys;
-        private Gee.HashMap<string, string> record_size_cache;
+        private Gee.HashMap<string, int64?> record_size_cache;
         private Gee.HashSet<string> updating_records;
         private Gee.HashMap<string, string> failed_update_keys; // key -> error message
         private DetailsWindow? active_details_window;
@@ -47,11 +47,14 @@ namespace AppManager {
         // Grid view fields
         private Gtk.FlowBox? grid_flow_box;
         private Gtk.ScrolledWindow? grid_scroll;
-        private Gtk.Button? view_toggle_button;
+        private Adw.SplitButton? view_sort_button;
         private Gtk.Box? apps_title_bar;
         private Gtk.Label? apps_title_label;
         private Gtk.Label? launch_hint_label;
         private string view_mode = "list";
+        private string sort_mode = "default";
+        private bool size_sort_ascending = false;
+        private bool name_sort_ascending = true;
         private bool _fullscreen_active = false;
         private string pre_fullscreen_view_mode = "list";
         private Gtk.Widget? import_hint_widget;
@@ -73,7 +76,7 @@ namespace AppManager {
             this.updater = new Updater(registry, installer);
             this.staged_updates = new StagedUpdatesManager();
             this.pending_update_keys = new Gee.HashSet<string>();
-            this.record_size_cache = new Gee.HashMap<string, string>();
+            this.record_size_cache = new Gee.HashMap<string, int64?>();
             this.updating_records = new Gee.HashSet<string>();
             this.failed_update_keys = new Gee.HashMap<string, string>();
             this.active_details_window = null;
@@ -82,6 +85,12 @@ namespace AppManager {
             if (this.view_mode != "list" && this.view_mode != "grid") {
                 this.view_mode = "list";
             }
+            this.sort_mode = settings.get_string("app-list-sort-mode");
+            if (this.sort_mode != "default" && this.sort_mode != "name" && this.sort_mode != "size") {
+                this.sort_mode = "default";
+            }
+            this.size_sort_ascending = settings.get_boolean("app-list-sort-size-ascending");
+            this.name_sort_ascending = settings.get_boolean("app-list-sort-name-ascending");
             this.set_default_size(settings.get_int("window-width"), settings.get_int("window-height"));
             build_ui();
             setup_window_actions();
@@ -458,7 +467,7 @@ namespace AppManager {
 
             var sorted = new Gee.ArrayList<InstallationRecord>();
             sorted.add_all(filtered_list);
-            sort_records_by_updated(sorted);
+            sort_records(sorted);
 
             if (view_mode == "grid") {
                 clear_grid_children();
@@ -532,6 +541,33 @@ namespace AppManager {
             }
             var base_title = _("My Apps");
             apps_title_label.set_text(count > 0 ? "%s (%d)".printf(base_title, count) : base_title);
+        }
+
+        private void sort_records(Gee.ArrayList<InstallationRecord> records) {
+            switch (sort_mode) {
+                case "name":
+                    records.sort((a, b) => {
+                        int cmp = compare_record_names(a, b);
+                        return name_sort_ascending ? cmp : -cmp;
+                    });
+                    break;
+                case "size":
+                    records.sort((a, b) => {
+                        int64 a_size = get_record_raw_size(a);
+                        int64 b_size = get_record_raw_size(b);
+                        if (a_size == b_size) {
+                            return compare_record_names(a, b);
+                        }
+                        if (size_sort_ascending) {
+                            return a_size < b_size ? -1 : 1;
+                        }
+                        return a_size > b_size ? -1 : 1;
+                    });
+                    break;
+                default:
+                    sort_records_by_updated(records);
+                    break;
+            }
         }
 
         private void sort_records_by_updated(Gee.ArrayList<InstallationRecord> records) {
@@ -794,9 +830,9 @@ namespace AppManager {
             return string.joinv(" ･ ", arr);
         }
 
-        private string? format_record_size(InstallationRecord record) {
+        private int64 get_record_raw_size(InstallationRecord record) {
             if (record.installed_path == null || record.installed_path.strip() == "") {
-                return null;
+                return -1;
             }
 
             var cache_key = record_state_key(record);
@@ -804,21 +840,24 @@ namespace AppManager {
                 return record_size_cache.get(cache_key);
             }
 
+            int64 size;
             try {
-                var size = AppManager.Utils.FileUtils.get_path_size(record.installed_path);
-                if (size <= 0) {
-                    return null;
-                }
-
-                var formatted = UiUtils.format_size(size);
-                if (formatted != null) {
-                    record_size_cache.set(cache_key, formatted);
-                }
-                return formatted;
+                size = AppManager.Utils.FileUtils.get_path_size(record.installed_path);
             } catch (Error e) {
                 warning("Failed to calculate size for %s: %s", record.name, e.message);
+                size = -1;
+            }
+
+            record_size_cache.set(cache_key, size);
+            return size;
+        }
+
+        private string? format_record_size(InstallationRecord record) {
+            var size = get_record_raw_size(record);
+            if (size <= 0) {
                 return null;
             }
+            return UiUtils.format_size(size);
         }
 
         private string? format_time_label(InstallationRecord record) {
@@ -1071,10 +1110,14 @@ namespace AppManager {
                 launch_hint_label.set_visible(view_mode == "grid");
                 title_column.append(launch_hint_label);
 
-                view_toggle_button = new Gtk.Button();
-                view_toggle_button.add_css_class("flat");
+                // Split button: the main part toggles list/grid view, the
+                // dropdown holds the sort options.
+                view_sort_button = new Adw.SplitButton();
+                view_sort_button.add_css_class("flat");
+                view_sort_button.set_menu_model(build_sort_menu());
+                view_sort_button.set_dropdown_tooltip(_("Sort apps"));
                 update_view_toggle_icon();
-                view_toggle_button.clicked.connect(() => {
+                view_sort_button.clicked.connect(() => {
                     if (view_mode == "list") {
                         view_mode = "grid";
                     } else {
@@ -1087,7 +1130,7 @@ namespace AppManager {
                 });
 
                 apps_title_bar.append(title_column);
-                apps_title_bar.append(view_toggle_button);
+                apps_title_bar.append(view_sort_button);
                 toolbar.add_top_bar(apps_title_bar);
             }
 
@@ -1096,16 +1139,65 @@ namespace AppManager {
         }
 
         private void update_view_toggle_icon() {
-            if (view_toggle_button == null) {
+            if (view_sort_button == null) {
                 return;
             }
             if (view_mode == "list") {
-                view_toggle_button.set_icon_name("view-grid-symbolic");
-                view_toggle_button.set_tooltip_text(_("Switch to grid view"));
+                view_sort_button.set_icon_name("view-grid-symbolic");
+                view_sort_button.set_tooltip_text(_("Switch to grid view"));
             } else {
-                view_toggle_button.set_icon_name("view-list-symbolic");
-                view_toggle_button.set_tooltip_text(_("Switch to list view"));
+                view_sort_button.set_icon_name("view-list-symbolic");
+                view_sort_button.set_tooltip_text(_("Switch to list view"));
             }
+        }
+
+        private GLib.MenuModel build_sort_menu() {
+            var menu = new GLib.Menu();
+            menu.append(_("Default"), "win.sort::default");
+
+            var name_section = new GLib.Menu();
+            name_section.append(_("Name (A-Z)"), "win.sort::name-asc");
+            name_section.append(_("Name (Z-A)"), "win.sort::name-desc");
+            menu.append_section(null, name_section);
+
+            var size_section = new GLib.Menu();
+            size_section.append(_("Size (smallest first)"), "win.sort::size-asc");
+            size_section.append(_("Size (largest first)"), "win.sort::size-desc");
+            menu.append_section(null, size_section);
+
+            return menu;
+        }
+
+        // The combined value (field + direction) the sort action exposes, so
+        // the menu radio reflects the current selection.
+        private string current_sort_value() {
+            switch (sort_mode) {
+                case "name":
+                    return name_sort_ascending ? "name-asc" : "name-desc";
+                case "size":
+                    return size_sort_ascending ? "size-asc" : "size-desc";
+                default:
+                    return "default";
+            }
+        }
+
+        private void apply_sort_value(string value) {
+            switch (value) {
+                case "name-asc":
+                    sort_mode = "name"; name_sort_ascending = true; break;
+                case "name-desc":
+                    sort_mode = "name"; name_sort_ascending = false; break;
+                case "size-asc":
+                    sort_mode = "size"; size_sort_ascending = true; break;
+                case "size-desc":
+                    sort_mode = "size"; size_sort_ascending = false; break;
+                default:
+                    sort_mode = "default"; break;
+            }
+            settings.set_string("app-list-sort-mode", sort_mode);
+            settings.set_boolean("app-list-sort-size-ascending", size_sort_ascending);
+            settings.set_boolean("app-list-sort-name-ascending", name_sort_ascending);
+            refresh_installations();
         }
 
         private bool is_fuse_installed() {
@@ -1152,6 +1244,14 @@ namespace AppManager {
             var fullscreen_action = new GLib.SimpleAction("toggle_fullscreen", null);
             fullscreen_action.activate.connect(on_toggle_fullscreen);
             add_window_action(fullscreen_action);
+
+            var sort_action = new GLib.SimpleAction.stateful(
+                "sort", GLib.VariantType.STRING, new GLib.Variant.string(current_sort_value()));
+            sort_action.activate.connect((param) => {
+                apply_sort_value(param.get_string());
+                sort_action.set_state(param);
+            });
+            add_window_action(sort_action);
         }
 
         private void add_window_action(GLib.Action action) {
@@ -1207,8 +1307,8 @@ namespace AppManager {
                 }
 
                 // Hide view toggle button
-                if (view_toggle_button != null) {
-                    view_toggle_button.visible = false;
+                if (view_sort_button != null) {
+                    view_sort_button.visible = false;
                 }
             } else {
                 // Restore bottom bar (only on main page)
@@ -1224,8 +1324,8 @@ namespace AppManager {
                 }
 
                 // Show view toggle button
-                if (view_toggle_button != null) {
-                    view_toggle_button.visible = true;
+                if (view_sort_button != null) {
+                    view_sort_button.visible = true;
                 }
 
                 // Update hint label visibility for restored view mode

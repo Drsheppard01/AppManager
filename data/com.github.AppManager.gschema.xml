@@ -71,6 +71,21 @@
       <summary>App list view mode</summary>
       <description>The layout mode for the app list. Either 'list' for a traditional list view or 'grid' for an icon grid view.</description>
     </key>
+    <key name="app-list-sort-mode" type="s">
+      <default>'default'</default>
+      <summary>App list sort mode</summary>
+      <description>The sort order for the app list. Either 'default' for most-recently-updated first, 'name' for alphabetical, or 'size' to sort by installed size.</description>
+    </key>
+    <key name="app-list-sort-size-ascending" type="b">
+      <default>false</default>
+      <summary>Sort by size ascending</summary>
+      <description>When sorting by size, list smallest apps first instead of largest first.</description>
+    </key>
+    <key name="app-list-sort-name-ascending" type="b">
+      <default>true</default>
+      <summary>Sort by name ascending</summary>
+      <description>When sorting by name, list apps A-Z instead of Z-A.</description>
+    </key>
     <key name="github-token" type="s">
       <default>''</default>
       <summary>GitHub personal access token</summary>
