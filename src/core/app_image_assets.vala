@@ -201,7 +201,10 @@ namespace AppManager.Core {
         }
 
         /**
-         * Extract all .desktop files from usr/share/applications/ inside the AppImage.
+         * Extract all .desktop files from the AppImage's applications directory.
+         * Standard AppImages keep these under usr/share/applications/; sharun-packed
+         * AppImages (e.g. anylinux Visual Studio Code) drop the usr prefix and use
+         * share/applications/. Both layouts are searched, deduplicated by filename.
          * Returns an array of paths to extracted files (empty if none present).
          * Used by issue #106 multi-desktop-entry support (e.g. WPS Office components).
          */
@@ -209,38 +212,46 @@ namespace AppManager.Core {
             var extra_root = Path.build_filename(temp_root, "extra_desktop");
             DirUtils.create_with_parents(extra_root, 0755);
 
-            if (!extract_entry(appimage_path, extra_root, "usr/share/applications/*.desktop")) {
-                return new string[0];
-            }
-
-            var apps_dir = Path.build_filename(extra_root, "usr", "share", "applications");
-            if (!FileUtils.test(apps_dir, FileTest.IS_DIR)) {
-                return new string[0];
-            }
+            string[] apps_dir_variants = { "usr/share/applications", "share/applications" };
 
             var results = new ArrayList<string>();
-            try {
-                var dir = Dir.open(apps_dir);
-                string? name;
-                while ((name = dir.read_name()) != null) {
-                    if (!name.has_suffix(".desktop")) continue;
-                    var path = Path.build_filename(apps_dir, name);
-                    if (FileUtils.test(path, FileTest.IS_DIR)) continue;
-
-                    var file = File.new_for_path(path);
-                    var type = file.query_file_type(FileQueryInfoFlags.NONE);
-                    if (type == FileType.SYMBOLIC_LINK) {
-                        try {
-                            results.add(resolve_symlink(path, appimage_path, extra_root));
-                        } catch (Error e) {
-                            debug("Skipping unresolvable extra desktop symlink %s: %s", path, e.message);
-                        }
-                    } else {
-                        results.add(path);
-                    }
+            var seen = new HashSet<string>();   // dedup by basename across both layouts
+            foreach (var rel_dir in apps_dir_variants) {
+                if (!extract_entry(appimage_path, extra_root, rel_dir + "/*.desktop")) {
+                    continue;
                 }
-            } catch (Error e) {
-                debug("Failed to list extra desktop entries in %s: %s", apps_dir, e.message);
+
+                var apps_dir = Path.build_filename(extra_root, rel_dir);
+                if (!FileUtils.test(apps_dir, FileTest.IS_DIR)) {
+                    continue;
+                }
+
+                try {
+                    var dir = Dir.open(apps_dir);
+                    string? name;
+                    while ((name = dir.read_name()) != null) {
+                        if (!name.has_suffix(".desktop")) continue;
+                        if (seen.contains(name)) continue;
+                        var path = Path.build_filename(apps_dir, name);
+                        if (FileUtils.test(path, FileTest.IS_DIR)) continue;
+
+                        var file = File.new_for_path(path);
+                        var type = file.query_file_type(FileQueryInfoFlags.NONE);
+                        if (type == FileType.SYMBOLIC_LINK) {
+                            try {
+                                results.add(resolve_symlink(path, appimage_path, extra_root));
+                                seen.add(name);
+                            } catch (Error e) {
+                                debug("Skipping unresolvable extra desktop symlink %s: %s", path, e.message);
+                            }
+                        } else {
+                            results.add(path);
+                            seen.add(name);
+                        }
+                    }
+                } catch (Error e) {
+                    debug("Failed to list extra desktop entries in %s: %s", apps_dir, e.message);
+                }
             }
 
             return results.to_array();
@@ -248,8 +259,9 @@ namespace AppManager.Core {
 
         /**
          * Look up a named icon inside the AppImage's icon themes.
-         * Tries usr/share/icons/hicolor/<size>/apps/<icon>.{png,svg} (largest size first),
-         * then usr/share/pixmaps/<icon>.{png,svg}. Returns the extracted file path or null.
+         * Tries <share>/icons/hicolor/<size>/apps/<icon>.{png,svg} (largest size first),
+         * then <share>/pixmaps/<icon>.{png,svg}, where <share> is usr/share (standard
+         * layout) or share (sharun-packed layout). Returns the extracted file path or null.
          */
         public static string? extract_named_icon(string appimage_path, string temp_root, string icon_name) {
             if (icon_name.strip() == "") return null;
@@ -257,34 +269,38 @@ namespace AppManager.Core {
             var icon_root = Path.build_filename(temp_root, "named_icons", icon_name);
             DirUtils.create_with_parents(icon_root, 0755);
 
-            // Try hicolor PNGs at all sizes; pick the largest available
+            string[] share_roots = { "usr/share", "share" };
             string[] sizes = { "512x512", "256x256", "192x192", "128x128", "96x96", "64x64", "48x48", "32x32", "24x24", "16x16" };
-            foreach (var size in sizes) {
-                var pattern = "usr/share/icons/hicolor/%s/apps/%s.png".printf(size, icon_name);
-                if (extract_entry(appimage_path, icon_root, pattern)) {
-                    var path = Path.build_filename(icon_root, "usr", "share", "icons", "hicolor", size, "apps", "%s.png".printf(icon_name));
+
+            foreach (var share_root in share_roots) {
+                // Try hicolor PNGs at all sizes; pick the largest available
+                foreach (var size in sizes) {
+                    var rel = "%s/icons/hicolor/%s/apps/%s.png".printf(share_root, size, icon_name);
+                    if (extract_entry(appimage_path, icon_root, rel)) {
+                        var path = Path.build_filename(icon_root, rel);
+                        if (FileUtils.test(path, FileTest.IS_REGULAR)) {
+                            return path;
+                        }
+                    }
+                }
+
+                // Try hicolor scalable SVG
+                var svg_rel = "%s/icons/hicolor/scalable/apps/%s.svg".printf(share_root, icon_name);
+                if (extract_entry(appimage_path, icon_root, svg_rel)) {
+                    var path = Path.build_filename(icon_root, svg_rel);
                     if (FileUtils.test(path, FileTest.IS_REGULAR)) {
                         return path;
                     }
                 }
-            }
 
-            // Try hicolor scalable SVG
-            var svg_pattern = "usr/share/icons/hicolor/scalable/apps/%s.svg".printf(icon_name);
-            if (extract_entry(appimage_path, icon_root, svg_pattern)) {
-                var path = Path.build_filename(icon_root, "usr", "share", "icons", "hicolor", "scalable", "apps", "%s.svg".printf(icon_name));
-                if (FileUtils.test(path, FileTest.IS_REGULAR)) {
-                    return path;
-                }
-            }
-
-            // Try pixmaps PNG then SVG
-            foreach (var ext in new string[] { "png", "svg" }) {
-                var pattern = "usr/share/pixmaps/%s.%s".printf(icon_name, ext);
-                if (extract_entry(appimage_path, icon_root, pattern)) {
-                    var path = Path.build_filename(icon_root, "usr", "share", "pixmaps", "%s.%s".printf(icon_name, ext));
-                    if (FileUtils.test(path, FileTest.IS_REGULAR)) {
-                        return path;
+                // Try pixmaps PNG then SVG
+                foreach (var ext in new string[] { "png", "svg" }) {
+                    var rel = "%s/pixmaps/%s.%s".printf(share_root, icon_name, ext);
+                    if (extract_entry(appimage_path, icon_root, rel)) {
+                        var path = Path.build_filename(icon_root, rel);
+                        if (FileUtils.test(path, FileTest.IS_REGULAR)) {
+                            return path;
+                        }
                     }
                 }
             }
