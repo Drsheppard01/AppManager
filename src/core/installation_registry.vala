@@ -136,6 +136,65 @@ namespace AppManager.Core {
         }
 
         /**
+         * Strips a trailing " (N)" copy suffix so secondary copies share a base name.
+         * "AppManager (2)" -> "AppManager"; "AppManager" -> "AppManager".
+         */
+        public static string base_name_of(string name) {
+            var trimmed = name.strip();
+            if (!trimmed.has_suffix(")")) {
+                return trimmed;
+            }
+            var open = trimmed.last_index_of_char('(');
+            if (open <= 0) {
+                return trimmed;
+            }
+            var inner = trimmed.substring(open + 1, trimmed.length - open - 2).strip();
+            if (inner == "") {
+                return trimmed;
+            }
+            for (int i = 0; i < inner.length; i++) {
+                if (inner[i] < '0' || inner[i] > '9') {
+                    return trimmed;
+                }
+            }
+            return trimmed.substring(0, open).strip();
+        }
+
+        /**
+         * Returns the suffix index to assign to a newly installed copy of the given
+         * app name. 0 when no installation shares the base name (primary install);
+         * otherwise the next free index >= 2 used for "Name (N)" secondary copies.
+         */
+        public int next_copy_index(string app_name) {
+            var target = base_name_of(app_name).down();
+            registry_mutex.lock();
+            var used = new Gee.HashSet<int>();
+            int base_count = 0;
+            foreach (var record in records.get_values()) {
+                if (record.name == null) {
+                    continue;
+                }
+                if (base_name_of(record.name).down() != target) {
+                    continue;
+                }
+                base_count++;
+                if (record.copy_index >= 2) {
+                    used.add(record.copy_index);
+                }
+            }
+            registry_mutex.unlock();
+
+            if (base_count == 0) {
+                return 0;
+            }
+            int candidate = 2;
+            while (used.contains(candidate)) {
+                candidate++;
+            }
+            return candidate;
+        }
+
+        /**
          * Marks an app as "in-flight" (being installed/uninstalled).
          * Reconcile will skip in-flight apps to prevent race conditions.
          */

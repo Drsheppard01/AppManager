@@ -66,6 +66,11 @@
       <summary>Keep the .AppImage extension on installed filenames</summary>
       <description>When enabled, AppManager preserves the .AppImage suffix on installed filenames and replaces spaces with underscores. Applies to new installations and upgrades.</description>
     </key>
+    <key name="allow-multiple-versions" type="b">
+      <default>false</default>
+      <summary>Allow multiple versions of the same app</summary>
+      <description>When enabled, installing an AppImage of an already-installed app keeps the existing one and installs the new one as a separate copy with a numbered suffix, e.g. "AppName (2)". An identical AppImage (same checksum) is still blocked.</description>
+    </key>
     <key name="app-list-view-mode" type="s">
       <default>'list'</default>
       <summary>App list view mode</summary>

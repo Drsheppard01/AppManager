@@ -123,11 +123,17 @@ namespace AppManager {
             sanitize_filenames_row.subtitle = _("Replace spaces with underscores in installed filenames and keep the .AppImage extension");
             settings.bind("sanitize-filenames-default", sanitize_filenames_row, "active", GLib.SettingsBindFlags.DEFAULT);
 
+            var allow_multiple_versions_row = new Adw.SwitchRow();
+            allow_multiple_versions_row.title = _("Allow multiple app versions");
+            allow_multiple_versions_row.subtitle = _("Keep the existing app and install a different AppImage as a separate copy with a numbered suffix");
+            settings.bind("allow-multiple-versions", allow_multiple_versions_row, "active", GLib.SettingsBindFlags.DEFAULT);
+
             install_group.add(install_dir_row);
             install_group.add(skip_drop_row);
             install_group.add(portable_home_row);
             install_group.add(portable_config_row);
             install_group.add(sanitize_filenames_row);
+            install_group.add(allow_multiple_versions_row);
             page.add(install_group);
 
             // Automatic updates group

@@ -389,7 +389,13 @@ Examples:
 
             // Check for existing installation
             var existing = registry.detect_existing(appimage_path, metadata.checksum, resolved_name);
-            if (existing != null) {
+            // "Allow multiple versions": a different AppImage (different checksum) of an
+            // already-installed app installs alongside it as a numbered copy, skipping the
+            // replace/update prompt. An identical AppImage still goes through the prompt.
+            bool install_alongside = existing != null
+                && settings.get_boolean("allow-multiple-versions")
+                && existing.source_checksum != metadata.checksum;
+            if (existing != null && !install_alongside) {
                 var relation = quick_install_version_relation(existing, resolved_version);
                 if (relation == 1) {
                     // Candidate is newer -> update dialog

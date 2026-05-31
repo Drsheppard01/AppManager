@@ -589,6 +589,7 @@ namespace AppManager {
             
             var advanced_group = new Adw.PreferencesGroup();
             advanced_group.title = _("App Settings");
+            advanced_group.add(build_name_row());
             advanced_group.add(build_keywords_row());
             advanced_group.add(build_icon_row());
             advanced_group.add(build_wmclass_row());
@@ -893,6 +894,20 @@ namespace AppManager {
             });
             
             return row;
+        }
+
+        private Adw.EntryRow build_name_row() {
+            return build_customizable_entry_row(
+                _("App Name"),
+                () => record.get_effective_name(),
+                () => record.original_name,
+                () => record.custom_name,
+                (v) => {
+                    record.custom_name = v;
+                    // Keep the display name in sync so the app list reflects the edit.
+                    record.name = record.get_effective_name();
+                }
+            );
         }
 
         private Adw.EntryRow build_keywords_row() {

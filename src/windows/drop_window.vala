@@ -277,7 +277,13 @@ namespace AppManager {
             }
 
             var existing = detect_existing_installation();
-            if (existing != null) {
+            // "Allow multiple versions": a different AppImage (different checksum) of an
+            // already-installed app installs alongside it as a numbered copy, skipping the
+            // replace/update prompt. An identical AppImage still goes through the prompt.
+            bool install_alongside = existing != null
+                && settings.get_boolean("allow-multiple-versions")
+                && existing.source_checksum != metadata.checksum;
+            if (existing != null && !install_alongside) {
                 var relation = determine_version_relation(existing);
                 if (relation == VersionRelation.CANDIDATE_NEWER) {
                     present_update_dialog(existing);

@@ -163,6 +163,13 @@ namespace AppManager.Core {
 
             var existing = detect_existing(file_path);
             if (existing != null) {
+                // "Allow multiple versions": a different AppImage (different checksum) of an
+                // already-installed app installs alongside it as a numbered copy instead of
+                // upgrading. An identical AppImage (same checksum) still upgrades/blocks.
+                if (settings.get_boolean("allow-multiple-versions")
+                    && existing.source_checksum != metadata.checksum) {
+                    return install(file_path);
+                }
                 is_upgrade = true;
                 return upgrade(file_path, existing);
             } else {
@@ -263,6 +270,8 @@ namespace AppManager.Core {
             if (old_record != null) {
                 record.installed_at = old_record.installed_at;
                 record.updated_at = (int64)GLib.get_real_time();
+                // Keep the secondary-copy suffix stable across updates (frozen counter).
+                record.copy_index = old_record.copy_index;
                 
                 // Carry over last_modified, content_length and release tag from old record
                 record.last_modified = old_record.last_modified;
@@ -278,6 +287,7 @@ namespace AppManager.Core {
                 // next probe recomputes it from the actual installed file.
                 
                 // Carry over custom values from old record (user customizations survive updates)
+                record.custom_name = old_record.custom_name;
                 record.custom_commandline_args = old_record.custom_commandline_args;
                 record.custom_keywords = old_record.custom_keywords;
                 record.custom_icon_name = old_record.custom_icon_name;
@@ -535,7 +545,23 @@ namespace AppManager.Core {
                 // but apply_history won't overwrite existing custom values (only fills in nulls)
                 registry.apply_history_to_record(record);
 
-                var slug = slugify_app_name(desktop_name);
+                // "Allow multiple versions": secondary copies get a frozen "(N)" suffix.
+                // Fresh installs compute the next free index; upgrades keep the carried one.
+                if (!is_upgrade) {
+                    record.copy_index = settings.get_boolean("allow-multiple-versions")
+                        ? registry.next_copy_index(desktop_name)
+                        : 0;
+                }
+                // naming_name drives slugs/filenames; record.name is the (custom-overridable)
+                // display name. original_name is the auto-assigned restore target.
+                var naming_name = record.copy_index >= 2
+                    ? "%s (%d)".printf(desktop_name, record.copy_index)
+                    : desktop_name;
+                var copy_suffix = record.copy_index >= 2 ? "-%d".printf(record.copy_index) : "";
+                record.original_name = naming_name;
+                record.name = record.get_effective_name();
+
+                var slug = slugify_app_name(naming_name);
                 if (slug == "") {
                     slug = metadata.sanitized_basename().down();
                 }
@@ -545,7 +571,7 @@ namespace AppManager.Core {
                 if (rename_for_extracted) {
                     renamed_path = ensure_install_name(record.installed_path, slug, true);
                 } else {
-                    var app_name = desktop_name.strip()
+                    var app_name = naming_name.strip()
                         .replace("/", " ")
                         .replace("\\", " ")
                         .replace("\n", " ")
@@ -615,7 +641,11 @@ namespace AppManager.Core {
                 
                 // Derive icon name without path and extension
                 var icon_name_for_desktop = derive_icon_name(original_icon_name, final_slug);
-                
+                // Secondary copies need a distinct icon filename so they don't overwrite the primary's.
+                if (copy_suffix != "") {
+                    icon_name_for_desktop = icon_name_for_desktop + copy_suffix;
+                }
+
                 // Derive fallback StartupWMClass from bundled desktop file name (without .desktop extension)
                 var fallback_startup_wm_class = derive_fallback_wmclass(desktop_path);
                 
@@ -651,12 +681,24 @@ namespace AppManager.Core {
                 var effective_args = record.get_effective_commandline_args();
                 var effective_update_link = record.get_effective_update_link();
                 var effective_web_page = record.get_effective_web_page();
-                
-                var desktop_contents = rewrite_desktop(desktop_path, exec_path, record, is_terminal_app, final_slug, is_upgrade, effective_icon, effective_keywords, effective_wmclass, effective_args, effective_update_link, effective_web_page);
+                var effective_name = record.get_effective_name();
+
+                var desktop_contents = rewrite_desktop(desktop_path, exec_path, record, is_terminal_app, final_slug, is_upgrade, effective_icon, effective_keywords, effective_wmclass, effective_args, effective_update_link, effective_web_page, effective_name);
                 
                 // Preserve original bundled desktop filename for proper desktop integration
                 var desktop_filename = Path.get_basename(desktop_path);
+                // Secondary copies get a suffixed (and guaranteed-unique) desktop file so they
+                // don't overwrite the primary's entry.
+                if (copy_suffix != "") {
+                    var stem = desktop_filename.has_suffix(".desktop")
+                        ? desktop_filename.substring(0, desktop_filename.length - 8)
+                        : desktop_filename;
+                    desktop_filename = "%s%s.desktop".printf(stem, copy_suffix);
+                }
                 var desktop_destination = Path.build_filename(AppPaths.desktop_dir, desktop_filename);
+                if (copy_suffix != "") {
+                    desktop_destination = Utils.FileUtils.unique_path(desktop_destination);
+                }
                 Utils.FileUtils.ensure_parent(desktop_destination);
                 
                 // Always write desktop file - custom values from JSON are applied via get_effective_*()
@@ -688,6 +730,10 @@ namespace AppManager.Core {
 
                 if (record.original_startup_wm_class == Core.APPLICATION_ID) {
                     symlink_name = "app-manager";
+                }
+                // Secondary copies need a distinct symlink so they don't overwrite the primary's.
+                if (copy_suffix != "") {
+                    symlink_name = symlink_name + copy_suffix;
                 }
                 // Default is to create a bin symlink. Terminal apps always do.
                 // Otherwise the user can opt out via custom_add_to_path = "false".
@@ -857,8 +903,14 @@ namespace AppManager.Core {
             return env_builder.str;
         }
 
-        private string rewrite_desktop(string desktop_path, string exec_target, InstallationRecord record, bool is_terminal, string slug, bool is_upgrade, string? effective_icon_name, string? effective_keywords, string? effective_startup_wm_class, string? effective_commandline_args, string? effective_update_link, string? effective_web_page) throws Error {
+        private string rewrite_desktop(string desktop_path, string exec_target, InstallationRecord record, bool is_terminal, string slug, bool is_upgrade, string? effective_icon_name, string? effective_keywords, string? effective_startup_wm_class, string? effective_commandline_args, string? effective_update_link, string? effective_web_page, string? effective_name = null) throws Error {
             var entry = new DesktopEntry(desktop_path);
+
+            // Update Name (secondary-copy suffix or user-customized app name). Leaving it
+            // null keeps the bundled .desktop Name untouched.
+            if (effective_name != null && effective_name.strip() != "") {
+                entry.name = effective_name.strip();
+            }
 
             // Update Exec with optional environment variables
             var args = effective_commandline_args ?? "";
@@ -1464,6 +1516,7 @@ namespace AppManager.Core {
             var effective_args = record.get_effective_commandline_args();
             var effective_update_link = record.get_effective_update_link();
             var effective_web_page = record.get_effective_web_page();
+            var effective_name = record.get_effective_name();
 
             try {
                 var new_contents = rewrite_desktop(
@@ -1478,7 +1531,8 @@ namespace AppManager.Core {
                     effective_wmclass,
                     effective_args,
                     effective_update_link,
-                    effective_web_page
+                    effective_web_page,
+                    effective_name
                 );
 
                 if (!GLib.FileUtils.set_contents(desktop_path, new_contents)) {
