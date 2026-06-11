@@ -904,6 +904,39 @@ namespace AppManager.Core {
         }
 
         private string rewrite_desktop(string desktop_path, string exec_target, InstallationRecord record, bool is_terminal, string slug, bool is_upgrade, string? effective_icon_name, string? effective_keywords, string? effective_startup_wm_class, string? effective_commandline_args, string? effective_update_link, string? effective_web_page, string? effective_name = null) throws Error {
+        // The portion of custom_commandline_args the user added beyond the root entry's default
+        // args (original_commandline_args). The root's defaults (e.g. %F) belong only to the
+        // primary Exec; appending them to entries that have their own field codes would duplicate
+        // them. Root default tokens are removed wherever they appear (not just as a prefix), so
+        // inserting custom args before or after %F yields the same result. Returns "" when the
+        // user set no custom args (or cleared them).
+        private string user_added_commandline_args(InstallationRecord record) {
+            if (record.custom_commandline_args == null
+                || record.custom_commandline_args == CLEARED_VALUE
+                || record.custom_commandline_args.strip() == "") {
+                return "";
+            }
+            var custom = record.custom_commandline_args.strip();
+            var original = (record.original_commandline_args ?? "").strip();
+            if (original == "") {
+                return custom;
+            }
+            var defaults = new Gee.HashSet<string>();
+            foreach (var tok in original.split(" ")) {
+                var t = tok.strip();
+                if (t != "") defaults.add(t);
+            }
+            var kept = new StringBuilder();
+            foreach (var tok in custom.split(" ")) {
+                var t = tok.strip();
+                if (t == "" || defaults.contains(t)) continue;
+                if (kept.len > 0) kept.append(" ");
+                kept.append(t);
+            }
+            return kept.str;
+        }
+
+        private string rewrite_desktop(string desktop_path, string exec_target, InstallationRecord record, bool is_terminal, string slug, bool is_upgrade, string? effective_icon_name, string? effective_keywords, string? effective_startup_wm_class, string? effective_commandline_args, string? effective_update_link, string? effective_web_page) throws Error {
             var entry = new DesktopEntry(desktop_path);
 
             // Update Name (secondary-copy suffix or user-customized app name). Leaving it
@@ -928,9 +961,9 @@ namespace AppManager.Core {
             // intrinsic args (--new-window, --screenshot, ...) instead of effective_commandline_args.
             // Pristine action args come from record.original_action_args (captured at install time);
             // re-parsing the current Exec would compound corruption across repeated rewrites.
-            var extra_user_args = (record.custom_commandline_args != null
-                && record.custom_commandline_args != CLEARED_VALUE
-                && record.custom_commandline_args.strip() != "") ? record.custom_commandline_args.strip() : "";
+            // Only the user-added args (not the root default %F) are appended, so an action's own
+            // field codes aren't duplicated by the root's default.
+            var extra_user_args = user_added_commandline_args(record);
             var keyfile = entry.get_key_file();
             if (record.original_action_args != null) {
                 foreach (var pair in record.original_action_args) {
@@ -1019,16 +1052,22 @@ namespace AppManager.Core {
          * Other fields (StartupWMClass, Categories, MimeType, NoDisplay, localized Name[xx])
          * are intentionally left untouched — these are what distinguish each component.
          */
-        private string rewrite_sub_desktop(string sub_desktop_path, string sub_binary_symlink_path, string? sub_icon_name, InstallationRecord record) throws Error {
+        private string rewrite_sub_desktop(string sub_desktop_path, string sub_binary_symlink_path, string? sub_icon_name, string pristine_args, InstallationRecord record) throws Error {
             var entry = new DesktopEntry(sub_desktop_path);
 
-            var original_exec = entry.exec ?? "";
-            var args = DesktopEntry.extract_exec_arguments(original_exec) ?? "";
+            // Apply the same custom env vars and command-line args as the primary entry.
+            // Each component keeps its own pristine args (captured at install in original_sub_args).
+            // Only the args the user ADDED beyond the root default are appended — appending the
+            // whole custom string would drag the root's default field codes (e.g. %F) into the
+            // component's own args. Using pristine_args (not the current Exec) avoids compounding.
+            var env_prefix = build_env_prefix(record.custom_env_vars);
+            var extra_user_args = user_added_commandline_args(record);
+            var args = (pristine_args + " " + extra_user_args).strip();
             string exec_line;
-            if (args.strip() != "") {
-                exec_line = "\"%s\" %s".printf(sub_binary_symlink_path, args);
+            if (args != "") {
+                exec_line = "%s\"%s\" %s".printf(env_prefix, sub_binary_symlink_path, args);
             } else {
-                exec_line = "\"%s\"".printf(sub_binary_symlink_path);
+                exec_line = "%s\"%s\"".printf(env_prefix, sub_binary_symlink_path);
             }
             entry.exec = exec_line;
 
@@ -1130,6 +1169,7 @@ namespace AppManager.Core {
             var installed_desktops = new Gee.ArrayList<string>();
             var installed_icons    = new Gee.ArrayList<string>();
             var installed_symlinks = new Gee.ArrayList<string>();
+            var sub_args           = new Gee.ArrayList<string>();
 
             foreach (var sub_path in extras) {
                 try {
@@ -1170,7 +1210,8 @@ namespace AppManager.Core {
                         }
                     }
 
-                    var contents = rewrite_sub_desktop(sub_path, sym, icon_name_for_desktop, record);
+                    var pristine_args = DesktopEntry.extract_exec_arguments(sub_exec) ?? "";
+                    var contents = rewrite_sub_desktop(sub_path, sym, icon_name_for_desktop, pristine_args, record);
                     var dest = Path.build_filename(AppPaths.desktop_dir, Path.get_basename(sub_path));
                     Utils.FileUtils.ensure_parent(dest);
                     if (!GLib.FileUtils.set_contents(dest, contents)) {
@@ -1195,6 +1236,7 @@ namespace AppManager.Core {
 
                     installed_desktops.add(dest);
                     installed_symlinks.add(sym);
+                    sub_args.add("%s=%s".printf(Path.get_basename(dest), pristine_args));
                     if (installed_icon_path != null) {
                         installed_icons.add(installed_icon_path);
                     }
@@ -1206,6 +1248,7 @@ namespace AppManager.Core {
             record.extra_desktop_files = installed_desktops.size > 0 ? installed_desktops.to_array() : null;
             record.extra_icon_paths    = installed_icons.size    > 0 ? installed_icons.to_array()    : null;
             record.extra_bin_symlinks  = installed_symlinks.size > 0 ? installed_symlinks.to_array() : null;
+            record.original_sub_args   = sub_args.size           > 0 ? sub_args.to_array()           : null;
         }
 
         private string build_uninstall_exec(string installed_path, bool is_self_install) {
@@ -1541,6 +1584,90 @@ namespace AppManager.Core {
             } catch (Error e) {
                 warning("Failed to rewrite desktop file %s: %s", desktop_path, e.message);
             }
+
+            apply_record_customizations_to_sub_desktops(record);
+        }
+
+        /**
+         * Re-applies custom env vars and command-line args to all installed sub-entries
+         * (multi-component AppImages). Mirrors the primary entry: each sub-entry keeps its
+         * pristine args (from original_sub_args, captured at install) with the user's custom
+         * args appended and env prefix prepended. Other fields are left untouched.
+         */
+        private void apply_record_customizations_to_sub_desktops(InstallationRecord record) {
+            var desktops = record.extra_desktop_files;
+            var symlinks = record.extra_bin_symlinks;
+            if (desktops == null || symlinks == null || desktops.length != symlinks.length) {
+                return;
+            }
+
+            // Map installed desktop basename -> pristine args captured at install.
+            var pristine = new Gee.HashMap<string, string>();
+            foreach (var pair in record.original_sub_args ?? new string[0]) {
+                var eq = pair.index_of_char('=');
+                if (eq < 0) continue;
+                pristine.set(pair.substring(0, eq), pair.substring(eq + 1));
+            }
+
+            bool backfilled = false;
+            for (int i = 0; i < desktops.length; i++) {
+                var sub_desktop = desktops[i];
+                // Records written by older versions can list the primary desktop file among
+                // the extras; rewriting it here would clobber the primary Exec just written.
+                if (sub_desktop == record.desktop_file) continue;
+                if (!File.new_for_path(sub_desktop).query_exists()) continue;
+                var basename = Path.get_basename(sub_desktop);
+                string args;
+                if (pristine.has_key(basename)) {
+                    args = pristine.get(basename);
+                } else {
+                    // Records from versions that didn't capture original_sub_args: derive the
+                    // pristine args from the on-disk Exec (minus any user-added args) and
+                    // backfill the record so later rewrites don't compound.
+                    args = derive_pristine_sub_args(sub_desktop, record);
+                    pristine.set(basename, args);
+                    backfilled = true;
+                }
+                try {
+                    // sub_icon_name = null preserves the icon already written at install.
+                    var contents = rewrite_sub_desktop(sub_desktop, symlinks[i], null, args, record);
+                    if (!GLib.FileUtils.set_contents(sub_desktop, contents)) {
+                        warning("Failed to write updated sub-desktop: %s", sub_desktop);
+                    }
+                } catch (Error e) {
+                    warning("Failed to rewrite sub-desktop %s: %s", sub_desktop, e.message);
+                }
+            }
+
+            if (backfilled) {
+                var entries = new Gee.ArrayList<string>();
+                foreach (var e in pristine.entries) {
+                    entries.add("%s=%s".printf(e.key, e.value));
+                }
+                record.original_sub_args = entries.to_array();
+                registry.persist(false);
+            }
+        }
+
+        // Pristine args for a sub-desktop whose record predates original_sub_args capture:
+        // the current on-disk Exec args minus tokens the user added via custom args.
+        private string derive_pristine_sub_args(string sub_desktop_path, InstallationRecord record) {
+            var entry = new DesktopEntry(sub_desktop_path);
+            var current = DesktopEntry.extract_exec_arguments(entry.exec ?? "") ?? "";
+            if (current.strip() == "") return "";
+            var user_tokens = new Gee.HashSet<string>();
+            foreach (var tok in user_added_commandline_args(record).split(" ")) {
+                var t = tok.strip();
+                if (t != "") user_tokens.add(t);
+            }
+            var kept = new StringBuilder();
+            foreach (var tok in current.split(" ")) {
+                var t = tok.strip();
+                if (t == "" || user_tokens.contains(t)) continue;
+                if (kept.len > 0) kept.append(" ");
+                kept.append(t);
+            }
+            return kept.str;
         }
 
         /**
