@@ -57,6 +57,22 @@ namespace AppManager.Core {
             return lookup_by_checksum(checksum) != null;
         }
 
+        /**
+         * Returns a free registry id for a new install: the checksum itself, or
+         * "checksum-N" when identical content is already installed side by side.
+         */
+        public string unique_record_id(string checksum) {
+            registry_mutex.lock();
+            var id = checksum;
+            int n = 2;
+            while (records.get(id) != null) {
+                id = "%s-%d".printf(checksum, n);
+                n++;
+            }
+            registry_mutex.unlock();
+            return id;
+        }
+
         public InstallationRecord? lookup_by_checksum(string checksum) {
             registry_mutex.lock();
             InstallationRecord? result = null;
@@ -136,34 +152,31 @@ namespace AppManager.Core {
         }
 
         /**
-         * Strips a trailing " (N)" copy suffix so secondary copies share a base name.
-         * "AppManager (2)" -> "AppManager"; "AppManager" -> "AppManager".
+         * Strips a trailing " N" copy suffix so secondary copies share a base name.
+         * "AppManager 2" -> "AppManager"; "AppManager" -> "AppManager".
          */
         public static string base_name_of(string name) {
             var trimmed = name.strip();
-            if (!trimmed.has_suffix(")")) {
+            var space = trimmed.last_index_of_char(' ');
+            if (space <= 0) {
                 return trimmed;
             }
-            var open = trimmed.last_index_of_char('(');
-            if (open <= 0) {
+            var suffix = trimmed.substring(space + 1);
+            if (suffix == "") {
                 return trimmed;
             }
-            var inner = trimmed.substring(open + 1, trimmed.length - open - 2).strip();
-            if (inner == "") {
-                return trimmed;
-            }
-            for (int i = 0; i < inner.length; i++) {
-                if (inner[i] < '0' || inner[i] > '9') {
+            for (int i = 0; i < suffix.length; i++) {
+                if (suffix[i] < '0' || suffix[i] > '9') {
                     return trimmed;
                 }
             }
-            return trimmed.substring(0, open).strip();
+            return trimmed.substring(0, space).strip();
         }
 
         /**
          * Returns the suffix index to assign to a newly installed copy of the given
          * app name. 0 when no installation shares the base name (primary install);
-         * otherwise the next free index >= 2 used for "Name (N)" secondary copies.
+         * otherwise the next free index >= 2 used for "Name N" secondary copies.
          */
         public int next_copy_index(string app_name) {
             var target = base_name_of(app_name).down();

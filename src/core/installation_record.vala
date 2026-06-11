@@ -25,8 +25,8 @@ namespace AppManager.Core {
         public string[]? extra_bin_symlinks  { get; set; }   // ~/.local/bin/<sub-binary>
         public int64 installed_at { get; set; }
         public int64 updated_at { get; set; default = 0; }
-        // Copy index for the "allow multiple versions" feature. 0 means the primary
-        // install (no suffix); >=2 means a secondary copy shown as "Name (N)".
+        // Copy index for side-by-side installs of the same app. 0 means the primary
+        // install (no suffix); >=2 means a secondary copy shown as "Name N".
         public int copy_index { get; set; default = 0; }
         public string? version { get; set; }
         public string? description { get; set; }  // App description from metainfo <summary> or desktop Comment
@@ -44,7 +44,7 @@ namespace AppManager.Core {
         
         // Original values captured from AppImage's .desktop during install/update
         // original_name is the name AppManager assigns at install (base name, plus the
-        // " (N)" suffix for secondary copies); it is the restore target for custom_name.
+        // " N" suffix for secondary copies); it is the restore target for custom_name.
         public string? original_name { get; set; }
         public string? original_commandline_args { get; set; }
         public string? original_keywords { get; set; }

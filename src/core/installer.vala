@@ -3,7 +3,6 @@ using Gee;
 
 namespace AppManager.Core {
     public errordomain InstallerError {
-        ALREADY_INSTALLED,
         DESKTOP_MISSING,
         EXTRACTION_FAILED,
         INCOMPATIBLE_ARCHITECTURE,
@@ -150,9 +149,10 @@ namespace AppManager.Core {
         /**
          * Full install flow: checks architecture, detects existing installation,
          * and either upgrades or installs. Sets is_upgrade to true if an existing
-         * installation was replaced.
+         * installation was replaced. With keep_both, an existing installation is
+         * never replaced — the app installs side by side as a numbered copy.
          */
-        public InstallationRecord install_or_upgrade(string file_path, out bool is_upgrade) throws Error {
+        public InstallationRecord install_or_upgrade(string file_path, out bool is_upgrade, bool keep_both = false) throws Error {
             is_upgrade = false;
 
             var metadata = new AppImageMetadata(File.new_for_path(file_path));
@@ -161,15 +161,12 @@ namespace AppManager.Core {
                     metadata.architecture ?? "unknown");
             }
 
+            if (keep_both) {
+                return install(file_path);
+            }
+
             var existing = detect_existing(file_path);
             if (existing != null) {
-                // "Allow multiple versions": a different AppImage (different checksum) of an
-                // already-installed app installs alongside it as a numbered copy instead of
-                // upgrading. An identical AppImage (same checksum) still upgrades/blocks.
-                if (settings.get_boolean("allow-multiple-versions")
-                    && existing.source_checksum != metadata.checksum) {
-                    return install(file_path);
-                }
                 is_upgrade = true;
                 return upgrade(file_path, existing);
             } else {
@@ -252,13 +249,12 @@ namespace AppManager.Core {
         private InstallationRecord install_sync(string file_path, InstallMode override_mode, InstallationRecord? old_record) throws Error {
             var file = File.new_for_path(file_path);
             var metadata = new AppImageMetadata(file);
-            if (old_record == null && registry.is_installed_checksum(metadata.checksum)) {
-                throw new InstallerError.ALREADY_INSTALLED("AppImage already installed");
-            }
 
             InstallMode mode = override_mode;
 
-            var record = new InstallationRecord(metadata.checksum, metadata.display_name, mode);
+            // Identical content may be installed side by side ("Keep Both"), so the
+            // registry id gets a "-N" suffix when the checksum is already taken.
+            var record = new InstallationRecord(registry.unique_record_id(metadata.checksum), metadata.display_name, mode);
             
             // Mark as in-flight immediately to prevent reconcile from interfering
             registry.mark_in_flight(record.id);
@@ -545,17 +541,21 @@ namespace AppManager.Core {
                 // but apply_history won't overwrite existing custom values (only fills in nulls)
                 registry.apply_history_to_record(record);
 
-                // "Allow multiple versions": secondary copies get a frozen "(N)" suffix.
-                // Fresh installs compute the next free index; upgrades keep the carried one.
+                // Secondary copies get a frozen "Name N" suffix. Fresh installs compute
+                // the next free index; upgrades keep the carried one.
                 if (!is_upgrade) {
-                    record.copy_index = settings.get_boolean("allow-multiple-versions")
-                        ? registry.next_copy_index(desktop_name)
-                        : 0;
+                    record.copy_index = registry.next_copy_index(desktop_name);
+                    // History applied above is keyed by the base name; a custom name
+                    // restored from it would drop the suffix and collide with the
+                    // primary install, so fresh copies start with the assigned name.
+                    if (record.copy_index >= 2) {
+                        record.custom_name = null;
+                    }
                 }
                 // naming_name drives slugs/filenames; record.name is the (custom-overridable)
                 // display name. original_name is the auto-assigned restore target.
                 var naming_name = record.copy_index >= 2
-                    ? "%s (%d)".printf(desktop_name, record.copy_index)
+                    ? "%s %d".printf(desktop_name, record.copy_index)
                     : desktop_name;
                 var copy_suffix = record.copy_index >= 2 ? "-%d".printf(record.copy_index) : "";
                 record.original_name = naming_name;
