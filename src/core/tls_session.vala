@@ -120,7 +120,11 @@ namespace AppManager.Core {
                     }
                 }
             } catch (Error e) {
-                warning("TlsSession: cannot read %s: %s", hook, e.message);
+                // Missing hook is expected when APPDIR is set outside a finished
+                // AppImage (e.g. quick-sharun tracing the binary mid-build).
+                if (!(e is FileError.NOENT)) {
+                    warning("TlsSession: cannot read %s: %s", hook, e.message);
+                }
             }
 
             foreach (var p in POSSIBLE_CA_BUNDLES) {
