@@ -340,7 +340,7 @@ namespace AppManager.Core {
          * Resolve zsync update info to a ZsyncDirectSource.
          * Handles both direct zsync URLs and gh-releases-zsync format.
          */
-        private ZsyncDirectSource? resolve_zsync_source(string zsync_info) {
+        private ZsyncDirectSource? resolve_zsync_source(string zsync_info, bool include_prerelease = false) {
             // Direct zsync URL: zsync|https://example.com/app.zsync
             var zsync_direct = ZsyncDirectSource.parse(zsync_info);
             if (zsync_direct != null) {
@@ -349,14 +349,14 @@ namespace AppManager.Core {
 
             // GitHub releases zsync: gh-releases-zsync|owner|repo|tag|pattern
             // This returns the source with version info for comparison
-            return resolve_gh_releases_zsync_source(zsync_info);
+            return resolve_gh_releases_zsync_source(zsync_info, include_prerelease);
         }
 
         // ─────────────────────────────────────────────────────────────────────
         // Update Source Resolution
         // ─────────────────────────────────────────────────────────────────────
 
-        private UpdateSource? resolve_update_source(string update_url, string? record_version) {
+        private UpdateSource? resolve_update_source(string update_url, string? record_version, bool include_prerelease = false) {
             // First check for zsync-specific formats from .upd_info
             var zsync_direct = ZsyncDirectSource.parse(update_url);
             if (zsync_direct != null) {
@@ -364,7 +364,7 @@ namespace AppManager.Core {
             }
 
             // Handle gh-releases-zsync by resolving to actual zsync URL with version
-            var resolved_zsync_source = resolve_gh_releases_zsync_source(update_url);
+            var resolved_zsync_source = resolve_gh_releases_zsync_source(update_url, include_prerelease);
             if (resolved_zsync_source != null) {
                 return resolved_zsync_source;
             }
@@ -393,55 +393,70 @@ namespace AppManager.Core {
          * Format: gh-releases-zsync|owner|repo|tag|filename-pattern
          * Returns the resolved ZsyncDirectSource with version, or null if resolution fails.
          */
-        private ZsyncDirectSource? resolve_gh_releases_zsync_source(string update_info) {
+        private ZsyncDirectSource? resolve_gh_releases_zsync_source(string update_info, bool include_prerelease = false) {
             if (!update_info.has_prefix("gh-releases-zsync|")) {
                 return null;
             }
-            
+
             var parts = update_info.split("|");
             if (parts.length < 5) {
                 return null;
             }
-            
+
             var owner = parts[1].strip();
             var repo = parts[2].strip();
             var tag = parts[3].strip();
             var pattern = parts[4].strip();
-            
+
             if (owner == "" || repo == "" || tag == "" || pattern == "") {
                 return null;
             }
-            
+
+            // The "latest" tag normally resolves via /releases/latest, which GitHub
+            // restricts to the newest non-prerelease release. When the user opts into
+            // pre-releases, scan the releases list instead so pre-releases are visible.
+            bool latest_stable = (tag == "latest" && !include_prerelease);
+
             try {
                 // Use appropriate API endpoint based on tag
                 string api_url;
-                if (tag == "latest") {
+                if (latest_stable) {
                     api_url = "https://api.github.com/repos/%s/%s/releases/latest".printf(owner, repo);
                 } else {
                     api_url = "https://api.github.com/repos/%s/%s/releases?per_page=10".printf(owner, repo);
                 }
-                
+
                 var root = fetch_json(api_url, "application/vnd.github+json", null);
                 if (root == null) return null;
-                
+
                 // Find matching asset
-                if (tag == "latest" && root.get_node_type() == Json.NodeType.OBJECT) {
+                if (latest_stable && root.get_node_type() == Json.NodeType.OBJECT) {
                     return find_zsync_asset_with_version(root.get_object(), pattern);
                 } else if (root.get_node_type() == Json.NodeType.ARRAY) {
                     var array = root.get_array();
                     for (uint i = 0; i < array.get_length(); i++) {
                         var node = array.get_element(i);
                         if (node.get_node_type() != Json.NodeType.OBJECT) continue;
-                        
+
                         var obj = node.get_object();
-                        // For specific tag, match it
-                        if (tag != "latest" && obj.has_member("tag_name")) {
+
+                        // Always skip drafts
+                        if (obj.has_member("draft") && obj.get_boolean_member("draft")) continue;
+
+                        if (tag == "latest") {
+                            // Newest-first scan for the "latest" channel: skip
+                            // pre-releases unless the user opted in.
+                            bool is_pre = obj.has_member("prerelease") && obj.get_boolean_member("prerelease");
+                            if (is_pre && !include_prerelease) continue;
+                        } else if (obj.has_member("tag_name")) {
+                            // Pinned tag: match it (prefix-tolerant); the tag itself
+                            // already selects the channel, so prerelease state is moot.
                             var release_tag = obj.get_string_member("tag_name");
                             if (release_tag != tag && !release_tag.has_prefix(tag)) {
                                 continue;
                             }
                         }
-                        
+
                         var source = find_zsync_asset_with_version(obj, pattern);
                         if (source != null) return source;
                     }
@@ -449,7 +464,7 @@ namespace AppManager.Core {
             } catch (Error e) {
                 warning("Failed to resolve gh-releases-zsync: %s", e.message);
             }
-            
+
             return null;
         }
 
@@ -610,7 +625,7 @@ namespace AppManager.Core {
         private UpdateProbeResult probe_record(InstallationRecord record, GLib.Cancellable? cancellable) {
             // Check if app uses zsync delta updates
             if (record.zsync_update_info != null && record.zsync_update_info.strip() != "") {
-                var zsync_source = resolve_zsync_source(record.zsync_update_info);
+                var zsync_source = resolve_zsync_source(record.zsync_update_info, record.prerelease_enabled);
                 if (zsync_source != null) {
                     return probe_zsync(record, zsync_source, cancellable);
                 }
@@ -621,7 +636,7 @@ namespace AppManager.Core {
                 return new UpdateProbeResult(record, false, null, UpdateSkipReason.NO_UPDATE_URL, _("No update address configured"));
             }
 
-            var source = resolve_update_source(update_url, record.version);
+            var source = resolve_update_source(update_url, record.version, record.prerelease_enabled);
             if (source == null) {
                 return new UpdateProbeResult(record, false, null, UpdateSkipReason.UNSUPPORTED_SOURCE, _("Update source not supported"));
             }
@@ -674,7 +689,7 @@ namespace AppManager.Core {
         private UpdateResult update_record(InstallationRecord record, GLib.Cancellable? cancellable) {
             // Check if app uses zsync delta updates
             if (record.zsync_update_info != null && record.zsync_update_info.strip() != "") {
-                var zsync_source = resolve_zsync_source(record.zsync_update_info);
+                var zsync_source = resolve_zsync_source(record.zsync_update_info, record.prerelease_enabled);
                 if (zsync_source != null) {
                     record_checking(record);
                     return update_zsync(record, zsync_source, cancellable);
@@ -690,7 +705,7 @@ namespace AppManager.Core {
 
             record_checking(record);
 
-            var source = resolve_update_source(update_url, record.version);
+            var source = resolve_update_source(update_url, record.version, record.prerelease_enabled);
             if (source == null) {
                 record_skipped(record, UpdateSkipReason.UNSUPPORTED_SOURCE);
                 log_update_event(record, "SKIP", "unsupported update source");

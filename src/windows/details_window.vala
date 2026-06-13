@@ -420,39 +420,44 @@ namespace AppManager {
             update_group.title = _("Update details");
             
             var has_zsync = record.zsync_update_info != null && record.zsync_update_info.strip() != "";
-            
+            // gh-releases-zsync resolves through the GitHub releases API, so it can
+            // honor the pre-release channel. A direct zsync URL points at a single
+            // fixed file and has no channel to switch.
+            var is_gh_releases_zsync = has_zsync && record.zsync_update_info.has_prefix("gh-releases-zsync|");
+
             // Pre-release toggle row (created early so update_row can reference it)
-            Adw.SwitchRow? prerelease_row = null;
-            if (!has_zsync) {
-                prerelease_row = new Adw.SwitchRow();
-                prerelease_row.title = _("Pre-release Updates");
-                prerelease_row.subtitle = _("Include pre-release versions when checking for updates");
-                prerelease_row.active = record.prerelease_enabled;
-                prerelease_row.notify["active"].connect(() => {
-                    record.prerelease_enabled = prerelease_row.active;
-                    registry.update(record);
-                });
+            var prerelease_row = new Adw.SwitchRow();
+            prerelease_row.title = _("Pre-release Updates");
+            prerelease_row.subtitle = _("Include pre-release versions when checking for updates");
+            prerelease_row.active = record.prerelease_enabled;
+            prerelease_row.notify["active"].connect(() => {
+                record.prerelease_enabled = prerelease_row.active;
+                registry.update(record);
+            });
+            if (has_zsync) {
+                // zsync link is read-only, so visibility is fixed for the lifetime of the row
+                prerelease_row.visible = is_gh_releases_zsync;
+            } else {
                 // Initial visibility based on current URL
                 var initial_url = record.get_effective_update_link() ?? "";
                 prerelease_row.visible = initial_url.down().contains("github.com");
             }
-            
-            // Update link row
-            var update_row = build_update_link_row(prerelease_row);
+
+            // Update link row. For zsync the link is read-only and its visibility must
+            // not track typing, so don't hand the toggle to the URL-sync handler.
+            var update_row = build_update_link_row(has_zsync ? null : prerelease_row);
             if (has_zsync) {
                 update_row.sensitive = false;
                 update_row.tooltip_text = _("Update link is managed by the embedded zsync update mechanism");
             }
             update_group.add(update_row);
-            
+
             // Web page row
             var webpage_row = build_webpage_row();
             update_group.add(webpage_row);
-            
+
             // Add pre-release row after web page
-            if (prerelease_row != null) {
-                update_group.add(prerelease_row);
-            }
+            update_group.add(prerelease_row);
             
             return update_group;
         }
